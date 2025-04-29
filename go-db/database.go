@@ -143,3 +143,41 @@ func nodeAppendKV(new BNode, idx uint16, ptr uint64, key []byte, val []byte) {
 
 // copy multiple kvs into the position from the old note
 func nodeAppendRange(new BNode, old BNode, dstNew uint16, srcOld uint16, n uint16)
+
+// replace a lint with one ore multiple links
+func nodeReplaceKidN(tree *BTree, new BNode, old BNode, idx uint16, kids ...BNode) {
+	inc := uint16(len(kids))
+	new.setHeader(BNODE_NODE, old.nkeys()+inc-1)
+	nodeAppendRange(new, old, 0, 0, idx)
+	for i, node := range kids {
+		nodeAppendKV(new, idx+uint16(i), tree.new(node), node.getKey(0), nil)
+	}
+
+	nodeAppendRange(new, old, idx+inc, idx+1, old.nkeys()-(idx+1))
+}
+
+// split a oversized node into 2 so that the 2nd node always fits on a page
+func nodeSplit2(left BNode, right BNode, old BNode) {
+	// TODO:  will do later
+}
+
+// split a node if its too big, the results are 1-3 nodes
+func nodeSplit3(old BNode) (uint16, [3]BNode) {
+	if old.nbytes() <= BTREE_PAGE_SIZE {
+		old = old[:BTREE_PAGE_SIZE]
+		return 1, [3]BNode{old} // did not split
+	}
+
+	left := BNode(make([]byte, 2*BTREE_PAGE_SIZE)) // might be split later
+	right := BNode(make([]byte, BTREE_PAGE_SIZE))
+	if left.nbytes() <= BTREE_PAGE_SIZE {
+		left = left[:BTREE_PAGE_SIZE]
+		return 2, [3]BNode{left, right} // 2 nodes
+	}
+	leftLeft := BNode(make([]byte, BTREE_PAGE_SIZE))
+	middle := BNode(make([]byte, BTREE_PAGE_SIZE))
+	nodeSplit2(leftLeft, middle, left)
+	assert(leftLeft.nbytes() <= BTREE_PAGE_SIZE)
+
+	return 3, [3]BNode{leftLeft, middle, right} // 3 nodes
+}
