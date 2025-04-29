@@ -230,3 +230,54 @@ func nodeInsert(tree *BTree, new BNode, node BNode, idx uint16, key []byte, val 
 
 	nodeReplaceKidN(tree, new, node, idx, split[:nsplit]...)
 }
+
+// HIGH LEVEL INTERFACES
+
+// insert a new key or update an existing key
+func (tree *BTree) Insert(key []byte, val []byte) {
+	if tree.root == 0 {
+		// create the first node
+		root := BNode(make([]byte, BTREE_PAGE_SIZE))
+		root.setHeader(BNODE_LEAF, 2)
+
+		// a dummy key, this makes the tree cover the whole key space
+		// this a lookup can always find a containing node
+		nodeAppendKV(root, 0, 0, nil, nil)
+		nodeAppendKV(root, 1, 0, key, val)
+
+		tree.root = tree.new(root)
+
+		return
+
+	}
+
+	node := treeInsert(tree, tree.get(tree.root), key, val)
+	nsplit, split := nodeSplit3(node)
+	tree.del(tree.root)
+
+	if nsplit > 1 {
+		// the root was split, add a new level
+		root := BNode(make([]byte, BTREE_PAGE_SIZE))
+		root.setHeader(BNODE_NODE, nsplit)
+		for i, knode := range split[:nsplit] {
+			ptr, key := tree.new(knode), knode.getKey(0)
+			nodeAppendKV(root, uint16(i), ptr, key, nil)
+		}
+
+		tree.root = tree.new(root)
+	} else {
+		tree.root = tree.new(split[0])
+	}
+}
+
+// delete a key and returns whether the key was there
+func (trr *BTree) Delete(key []byte) bool
+
+// remove a key from a leaf node
+func leafDelete(new BNode, old BNode, idx uint16)
+
+// merge 2 nodes into 1
+func nodeMerge(new BNode, left BNode, right BNode)
+
+// replace 2 adjacent links with 1
+func nodeReplace2Kid(new BNode, old BNode, idx uint16, ptr uint64, key []byte)
