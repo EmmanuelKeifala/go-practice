@@ -313,3 +313,43 @@ func shouldMerge(tree *BTree, node BNode, idx uint16, updated BNode) (int, BNode
 
 	return 0, BNode{}
 }
+
+// delete a key from the tree
+func treeDelete(tree *BTree, node BNode, key []byte) BNode
+
+// delete a key from an internal node; part of the treeDelete()
+func nodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
+	// recurse into the kid
+	kptr := node.getPtr(idx)
+	updated := treeDelete(tree, tree.get(kptr), key)
+
+	if len(updated) == 0 {
+		return BNode{} // not found
+	}
+	tree.del(kptr)
+
+	new := BNode(make([]byte, BTREE_PAGE_SIZE))
+
+	// check for mergin
+	mergeDir, sibling := shouldMerge(tree, node, idx, updated)
+
+	switch {
+	case mergeDir < 0: // left
+		merged := BNode(make([]byte, BTREE_PAGE_SIZE))
+		nodeMerge(merged, sibling, updated)
+		tree.del(node.getPtr(idx - 1))
+		nodeReplace2Kid(new, node, idx-1, tree.new(merged), merged.getKey(0))
+	case mergeDir > 0: // right
+		merged := BNode(make([]byte, BTREE_PAGE_SIZE))
+		nodeMerge(merged, updated, sibling)
+		tree.del(node.getPtr(idx + 1))
+		nodeReplace2Kid(new, node, idx, tree.new(merged), merged.getKey(0))
+	case mergeDir == 0 && updated.nkeys() == 0:
+		assert(node.nkeys() == 1 && idx == 0) // 1 empty child but no sibling
+		new.setHeader(BNODE_NODE, 0)          // the parent becomes empty too
+	case mergeDir == 0 && updated.nkeys() > 0: // no merge
+		nodeReplaceKidN(tree, new, node, idx, updated)
+	}
+
+	return new
+}
