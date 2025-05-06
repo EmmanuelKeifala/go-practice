@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"unsafe"
 )
 
 const HEADER = 4
@@ -274,13 +275,34 @@ func (tree *BTree) Insert(key []byte, val []byte) {
 func (trr *BTree) Delete(key []byte) bool
 
 // remove a key from a leaf node
-func leafDelete(new BNode, old BNode, idx uint16)
+func leafDelete(new BNode, old BNode, idx uint16) {
+	new.setHeader(BNODE_LEAF, old.nkeys()-1)
+	nodeAppendRange(new, old, 0, 0, idx)
+	nodeAppendRange(new, old, idx, idx+1, old.nkeys()-(idx+1))
+}
 
 // merge 2 nodes into 1
-func nodeMerge(new BNode, left BNode, right BNode)
+func nodeMerge(new BNode, left BNode, right BNode) {
+	new.setHeader(left.btype(), left.nkeys()+right.nkeys())
+	nodeAppendRange(new, left, 0, 0, left.nkeys())
+	nodeAppendRange(new, right, left.nkeys(), 0, right.nkeys())
+}
 
 // replace 2 adjacent links with 1
-func nodeReplace2Kid(new BNode, old BNode, idx uint16, ptr uint64, key []byte)
+func nodeReplace2Kid(new BNode, old BNode, idx uint16, ptr uint64, key []byte) {
+	new.setHeader(BNODE_NODE, old.nkeys()-1)
+	nodeAppendRange(new, old, 0, 0, idx)
+	nodeAppendRange(new, old, idx, idx+2, old.nkeys()-(idx+2))
+	new.setPtr(idx, ptr)
+	new.setKey(idx, key)
+}
+
+func (node BNode) setKey(idx uint16, key []byte) {
+	pos := node.kvPos(idx)
+	klen := uint16(len(key))
+	binary.LittleEndian.PutUint16(node[pos:], klen)
+	copy(node[pos+4:], key)
+}
 
 //============================== MERGE CONDITIONS =======================
 
@@ -315,7 +337,34 @@ func shouldMerge(tree *BTree, node BNode, idx uint16, updated BNode) (int, BNode
 }
 
 // delete a key from the tree
-func treeDelete(tree *BTree, node BNode, key []byte) BNode
+func treeDelete(tree *BTree, node BNode, key []byte) BNode {
+	// The result node. It's allowed to be oversized and will be handled by the parent.
+	new := BNode(make([]byte, 2*BTREE_PAGE_SIZE))
+
+	// Find the position to delete
+	idx := nodeLookUpLE(node, key)
+
+	switch node.btype() {
+	case BNODE_LEAF:
+		// Handle leaf node deletion
+		if !bytes.Equal(key, node.getKey(idx)) {
+			// Key not found
+			return BNode{}
+		}
+
+		// Delete the key from the leaf
+		leafDelete(new, node, idx)
+
+	case BNODE_NODE:
+		// Handle internal node deletion (recursive)
+		return nodeDelete(tree, node, idx, key)
+
+	default:
+		panic("bad node!")
+	}
+
+	return new
+}
 
 // delete a key from an internal node; part of the treeDelete()
 func nodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
@@ -352,4 +401,44 @@ func nodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
 	}
 
 	return new
+}
+
+// ==================  TEST THE B+TREE ====================== ////////
+
+type C struct {
+	tree  BTree
+	ref   map[string]string // the reference data
+	pages map[uint64]BNode  // in-memory pages
+}
+
+func newC() *C {
+	pages := map[uint64]BNode{}
+	return &C{
+		tree: BTree{
+			get: func(ptr uint64) []byte {
+				node, ok := pages[ptr]
+				assert(ok)
+				return node
+			},
+			new: func(node []byte) uint64 {
+				assert(BNode(node).nbytes() <= BTREE_PAGE_SIZE)
+				ptr := uint64(uintptr(unsafe.Pointer(&node[0])))
+				assert(pages[ptr] == nil)
+				pages[ptr] = node
+				return ptr
+			},
+			del: func(ptr uint64) {
+				assert(pages[ptr] != nil)
+				delete(pages, ptr)
+			},
+		},
+
+		ref:   map[string]string{},
+		pages: pages,
+	}
+}
+
+func (c *C) add(key string, val string) {
+	c.tree.Insert([]byte(key), []byte(val))
+	c.ref[key] = val // reference data
 }
