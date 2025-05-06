@@ -61,7 +61,11 @@ func (node BNode) getPtr(idx uint16) uint64 {
 	pos := HEADER + 8*idx
 	return binary.LittleEndian.Uint64(node[pos : pos+8])
 }
-func (node BNode) setPtr(idx uint16, val uint64)
+func (node BNode) setPtr(idx uint16, val uint64) {
+	assert(idx < node.nkeys())
+	pos := HEADER + 8*idx // Calculate position (header + 8 bytes per pointer)
+	binary.LittleEndian.PutUint64(node[pos:pos+8], val)
+}
 
 // offset list
 func offsetPos(node BNode, idx uint16) uint16 {
@@ -74,7 +78,11 @@ func (node BNode) getOffset(idx uint16) uint16 {
 	}
 	return binary.LittleEndian.Uint16(node[offsetPos(node, idx):])
 }
-func (node BNode) setOffset(idx uint16, offset uint16)
+func (node BNode) setOffset(idx uint16, offset uint16) {
+	assert(1 <= idx && idx <= node.nkeys())
+	pos := offsetPos(node, idx)
+	binary.LittleEndian.PutUint16(node[pos:], offset)
+}
 
 // Key Values
 func (node BNode) kvPos(idx uint16) uint16 {
@@ -91,7 +99,18 @@ func (node BNode) getKey(idx uint16) []byte {
 	return node[pos+4:][:klen]
 }
 
-func (node BNode) getVal(idx uint16) []byte
+func (node BNode) getVal(idx uint16) []byte {
+	assert(idx < node.nkeys())
+	pos := node.kvPos(idx)
+
+	// First 2 bytes are key length, next 2 bytes are value length
+	klen := binary.LittleEndian.Uint16(node[pos:])
+	vlen := binary.LittleEndian.Uint16(node[pos+2:])
+
+	// Value starts after the 4-byte header and key
+	valStart := pos + 4 + klen
+	return node[valStart : valStart+vlen]
+}
 
 // node size in byte
 func (node BNode) nbytes() uint16 {
@@ -143,7 +162,32 @@ func nodeAppendKV(new BNode, idx uint16, ptr uint64, key []byte, val []byte) {
 }
 
 // copy multiple kvs into the position from the old note
-func nodeAppendRange(new BNode, old BNode, dstNew uint16, srcOld uint16, n uint16)
+func nodeAppendRange(new BNode, old BNode, dstNew uint16, srcOld uint16, n uint16) {
+	assert(srcOld+n <= old.nkeys())
+	assert(dstNew+n <= new.nkeys())
+
+	if n == 0 {
+		return
+	}
+
+	// 1. Copy pointers
+	for i := uint16(0); i < n; i++ {
+		new.setPtr(dstNew+i, old.getPtr(srcOld+i))
+	}
+
+	// 2. Copy offsets
+	dstBegin := new.getOffset(dstNew)
+	srcBegin := old.getOffset(srcOld)
+	for i := uint16(1); i <= n; i++ {
+		offset := dstBegin + (old.getOffset(srcOld+i) - srcBegin)
+		new.setOffset(dstNew+i, offset)
+	}
+
+	// 3. Copy key-value pairs
+	begin := old.kvPos(srcOld)
+	end := old.kvPos(srcOld + n)
+	copy(new[new.kvPos(dstNew):], old[begin:end])
+}
 
 // replace a lint with one ore multiple links
 func nodeReplaceKidN(tree *BTree, new BNode, old BNode, idx uint16, kids ...BNode) {
@@ -272,7 +316,60 @@ func (tree *BTree) Insert(key []byte, val []byte) {
 }
 
 // delete a key and returns whether the key was there
-func (trr *BTree) Delete(key []byte) bool
+func (tree *BTree) Delete(key []byte) bool {
+	if tree.root == 0 {
+		return false // empty tree
+	}
+
+	// Start recursive deletion from the root
+	updated := treeDelete(tree, tree.get(tree.root), key)
+	if len(updated) == 0 {
+		return false // key not found
+	}
+
+	tree.del(tree.root) // deallocate old root
+
+	// Handle root updates
+	switch updated.btype() {
+	case BNODE_NODE:
+		if updated.nkeys() == 1 {
+			// Root has only one child, make it the new root
+			newRoot := tree.get(updated.getPtr(0))
+			tree.root = tree.new(newRoot)
+			tree.del(updated.getPtr(0)) // deallocate child (it was copied)
+			return true
+		}
+		// Fall through to normal root update
+	case BNODE_LEAF:
+		if updated.nkeys() == 0 {
+			// Tree is now empty
+			tree.root = 0
+			return true
+		}
+	}
+
+	// Check if root needs splitting (unlikely but possible)
+	if updated.nbytes() <= BTREE_PAGE_SIZE {
+		tree.root = tree.new(updated)
+	} else {
+		// Split the root if it's too large
+		nsplit, split := nodeSplit3(updated)
+		if nsplit > 1 {
+			newRoot := BNode(make([]byte, BTREE_PAGE_SIZE))
+			newRoot.setHeader(BNODE_NODE, nsplit)
+			for i, knode := range split[:nsplit] {
+				ptr := tree.new(knode)
+				newRoot.setPtr(uint16(i), ptr)
+				newRoot.setKey(uint16(i), knode.getKey(0))
+			}
+			tree.root = tree.new(newRoot)
+		} else {
+			tree.root = tree.new(split[0])
+		}
+	}
+
+	return true
+}
 
 // remove a key from a leaf node
 func leafDelete(new BNode, old BNode, idx uint16) {
